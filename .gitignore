@@ -15,3 +15,8 @@ gradle-app.setting
 # # Work around https://youtrack.jetbrains.com/issue/IDEA-116898
 # gradle/wrapper/gradle-wrapper.properties
 
+/src/main/groovy/de/geobe/siteutil/config/liveConfig.groovy
+/src/main/groovy/de/geobe/siteutil/config/liveConfig
+/src/main/groovy/de/geobe/siteutil/config/testConfig
+/src/main/resources/de/geobe/siteutil/config/liveConfig.cfg
+/src/test/resources/de.geobe.siteutil.config/liveConfig.cfg
