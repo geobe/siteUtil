@@ -45,6 +45,7 @@ class SiteInteractionSpec extends GebSpec {
     def out = config.logout.url
     def edit = config.dyndns.url
     def targetName = config.dyndomain
+    def acmeChallenge = config.acmeChallenge
     def targetIp = '192.168.168.192'
 
     def setupSpec() {
@@ -100,14 +101,15 @@ class SiteInteractionSpec extends GebSpec {
 
     }
 
-    @Ignore
+//    @Ignore
     def 'can find relevant inputs on dns config page'() {
         when:
         to LoginPage
         login(usr, pwd)
         to DnsEditPage
-        def found1 = setRecordForDomain(targetName, 'TXT', mockKey)
-        println "$found1"
+        def found1 = setRecordForDomain(acmeChallenge.nameFieldValue, 'TXT', mockKey)
+        println "$found1 -> dataRecordId = ${found1.dataRecordId}"
+        fieldId = found1.dataRecordId
         println "new value: ${$('form', id: 'form-dns').$('input', name: 'content_' + found1.dataRecordId).value()}"
         sleep(2000)
         then:
@@ -119,23 +121,15 @@ class SiteInteractionSpec extends GebSpec {
 
     }
 
-    def 'configuration method finds field'() {
-        when:
-        fieldId = config.setTxtRecord(mockKey)
-        then:
-        fieldId != ''
-        cleanup:
-        go out
-        sleep(2000)
-    }
 
+//    @Ignore
     def 'configuration was done by methods'() {
         when:
         to LoginPage
         login(usr, pwd)
         to DnsEditPage
         def actualValue = $('form', id: 'form-dns').
-                $('input', name: 'content_' + fieldId.dataRecordId).value()
+                $('input', name: 'content_' + fieldId).value()
         sleep(2000)
         then:
         actualValue == mockKey

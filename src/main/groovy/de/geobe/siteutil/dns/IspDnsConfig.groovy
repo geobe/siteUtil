@@ -35,6 +35,8 @@ import geb.module.TextInput
  * Created by georg beier on 07.03.2020.
  */
 class IspDnsConfig {
+    def waitOnPage = false
+    def sleeptime = 1000
     def login
     def admin
     def dyndns
@@ -48,32 +50,58 @@ class IspDnsConfig {
      * @param configfile
      */
     IspDnsConfig(String configfile) {
-        def conf = new Configuration().init(configfile)
-        login = conf.dnssite.login
-        admin = conf.dnssite.admin
-        dyndns = conf.dnssite.dyndns
-        acmeChallenge = conf.dyndns.acmeChallenge
-        logout = conf.dnssite.logout
-        baseUrl = conf.dnssite.baseUrl
-        dyndomain = conf.dyndomain
+        def config = new Configuration().init(configfile)
+        login = config.dnssite.login
+        admin = config.dnssite.admin
+        dyndns = config.dnssite.dyndns
+        acmeChallenge = config.dnssite.acmeChallenge
+        logout = config.dnssite.logout
+        baseUrl = config.dnssite.baseUrl
+        dyndomain = config.dyndomain
+
+    }
+
+    def initUris() {
+        LoginPage.url = login.url
+        LoginPage.at = { title == login.title }
+        LogoutPage.url = logout.url
+        LogoutPage.at = { title == login.title }
+        AdminPage.url = admin.url
+        AdminPage.at = { title == admin.title }
+        DnsEditPage.url = dyndns.url
+        DnsEditPage.at = { title == dyndns.title }
+
     }
 
     def setIpAddress(String myIp) {
-        setDnsRecord('A', myIp)
+        setDnsRecord(dyndns.nameFieldValue,'A', myIp)
     }
 
     def setTxtRecord(String acmeChallenge) {
-        setDnsRecord('TXT', acmeChallenge)
+        setDnsRecord(acmeChallenge.nameFieldValue,'TXT', acmeChallenge)
     }
 
-    private setDnsRecord(String recType, String recValue) {
+    /**
+     * Set a field value on the dns configuration page, @see DnsEditPage#setRecordForDomain
+     * @param recordInputFieldName name attribute of html input
+     * @param recType DNS record type, must be eiteher A or TXT
+     * @param recValue value to be set
+     * @return
+     */
+    private setDnsRecord(String recordInputFieldName, String recType, String recValue) {
         def retval
         Browser.drive {
+            initUris()
             to LoginPage
+            if(waitOnPage) Thread.sleep(sleeptime)
             login(login.user, login.password)
+            if(waitOnPage) Thread.sleep(sleeptime)
             to DnsEditPage
-            retval = setRecordForDomain(dyndomain, recType, recValue)
+            if(waitOnPage) Thread.sleep(sleeptime)
+            retval = setRecordForDomain(recordInputFieldName, recType, recValue)
+            if(waitOnPage) Thread.sleep(sleeptime)
             go logout.url
+            if(waitOnPage) Thread.sleep(sleeptime)
         }
         return retval
     }
