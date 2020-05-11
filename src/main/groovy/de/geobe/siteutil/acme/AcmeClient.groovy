@@ -20,7 +20,6 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.shredzone.acme4j.*
 import org.shredzone.acme4j.challenge.Challenge
 import org.shredzone.acme4j.challenge.Dns01Challenge
-import org.shredzone.acme4j.challenge.Http01Challenge
 import org.shredzone.acme4j.exception.AcmeException
 import org.shredzone.acme4j.util.CSRBuilder
 import org.shredzone.acme4j.util.KeyPairUtils
@@ -32,32 +31,76 @@ import java.security.KeyPair
 import java.security.Security
 
 /**
- * A simple client test tool.
+ * A simple acme client.
  * <p>
  * Pass the names of the domains as parameters.
+ * <p>
+ * All preset instance fields could be overwritten by Groovy's default initializing constructor
  */
 class AcmeClient {
     // File name of the User Key Pair
-    private static final File USER_KEY_FILE = new File("user.key")
+    private File userKeyFile = new File("user.key")
 
     // File name of the Domain Key Pair
-    private static final File DOMAIN_KEY_FILE = new File("domain.key")
+    private File domainKeyFile = new File("domain.key")
 
     // File name of the CSR
-    private static final File DOMAIN_CSR_FILE = new File("domain.csr")
+    private File domainCsrFile = new File("domain.csr")
 
     // File name of the signed certificate
-    private static final File DOMAIN_CHAIN_FILE = new File("domain-chain.crt")
+    private File domainChainFile = new File("domain-chain.crt")
 
-    //Challenge type to be used
-    private static final ChallengeType CHALLENGE_TYPE = ChallengeType.DNS
+    // To create a session for Let's Encrypt.
+    // Use "acme://letsencrypt.org" for production server
+    private String acmeUri = 'acme://letsencrypt.org/staging'
 
     // RSA key size of generated key pairs
     private static final int KEY_SIZE = 2048
 
     private static final Logger LOG = LoggerFactory.getLogger(AcmeClient.class)
 
-    private enum ChallengeType { HTTP, DNS }
+    private static class SessionData {
+        KeyPair userKeyPair
+        KeyPair domainKeyPair
+        Session session
+        Account acct
+    }
+
+    private static class ChallengeInfo {
+        String domain
+        String digest
+        boolean stillValid
+    }
+
+    private SessionData sessionData = new SessionData()
+
+    void prepare() {
+        // Load the user key file. If there is no key file, create a new one.
+        sessionData.userKeyPair = loadOrCreateKeyPair(userKeyFile)
+
+        // Create a session for Let's Encrypt.
+        // Use "acme://letsencrypt.org" for production server
+        sessionData.session = new Session(acmeUri)
+
+        // Load or create a key pair for the domains. This should not be the userKeyPair!
+        sessionData.domainKeyPair = loadOrCreateKeyPair(domainKeyFile)
+    }
+
+    def requestChallenge(Collection<String> domains) throws IOException, AcmeException {
+        // Get the Account.
+        // If there is no account yet, create a new one.
+        sessionData.acct = findOrRegisterAccount(sessionData.session, sessionData.userKeyPair)
+
+        // Order the certificate
+        Order order = sessionData.acct.newOrder().domains(domains).create()
+
+        // Perform all required authorizations
+        for (Authorization auth : order.getAuthorizations()) {
+            authorize(auth)
+        }
+
+
+    }
 
     /**
      * Generates a certificate for the given domains. Also takes care for the registration
@@ -68,11 +111,11 @@ class AcmeClient {
      */
     void fetchCertificate(Collection<String> domains) throws IOException, AcmeException {
         // Load the user key file. If there is no key file, create a new one.
-        KeyPair userKeyPair = loadOrCreateUserKeyPair()
+        KeyPair userKeyPair = loadOrCreateKeyPair(userKeyFile)
 
         // Create a session for Let's Encrypt.
         // Use "acme://letsencrypt.org" for production server
-        Session session = new Session("acme://letsencrypt.org/staging")
+        Session session = new Session(acmeUri)
 
         // Get the Account.
         // If there is no account yet, create a new one.
@@ -95,7 +138,7 @@ class AcmeClient {
         csrb.sign(domainKeyPair)
 
         // Write the CSR to a file, for later use.
-        DOMAIN_CSR_FILE.withWriter {out ->
+        domainCsrFile.withWriter { out ->
 //        try (Writer out = new FileWriter(DOMAIN_CSR_FILE)) {
             csrb.write(out)
         }
@@ -130,7 +173,7 @@ class AcmeClient {
         LOG.info("Certificate URL: {}", certificate.getLocation())
 
         // Write a combined file containing the certificate and chain.
-        DOMAIN_CHAIN_FILE.withWriter {fw ->
+        domainChainFile.withWriter { fw ->
 //        try (FileWriter fw = new FileWriter(DOMAIN_CHAIN_FILE)) {
             certificate.writeCertificate(fw)
         }
@@ -140,52 +183,28 @@ class AcmeClient {
     }
 
     /**
-     * Loads a user key pair from {@value #USER_KEY_FILE}. If the file does not exist,
+     * Loads a user key pair from keyFile. If the file does not exist,
      * a new key pair is generated and saved.
      * <p>
      * Keep this key pair in a safe place! In a production environment, you will not be
      * able to access your account again if you should lose the key pair.
-     *
-     * @return User's {@link KeyPair}.
+     * @param keyFile the file to read or create
+     * @return a KeyPair.
      */
-    private KeyPair loadOrCreateUserKeyPair() throws IOException {
-        if (USER_KEY_FILE.exists()) {
+    private KeyPair loadOrCreateKeyPair(File keyFile) throws IOException {
+        if (keyFile.exists()) {
             // If there is a key file, read it
-            USER_KEY_FILE.withReader {fr ->
-//            try (FileReader fr = new FileReader(USER_KEY_FILE)) {
+            keyFile.withReader { fr ->
                 return KeyPairUtils.readKeyPair(fr)
             }
 
         } else {
             // If there is none, create a new key pair and save it
-            KeyPair userKeyPair = KeyPairUtils.createKeyPair(KEY_SIZE)
-            USER_KEY_FILE.withWriter {fw ->
-//            try (FileWriter fw = new FileWriter(USER_KEY_FILE)) {
-                KeyPairUtils.writeKeyPair(userKeyPair, fw)
+            KeyPair keyPair = KeyPairUtils.createKeyPair(KEY_SIZE)
+            keyFile.withWriter { fw ->
+                KeyPairUtils.writeKeyPair(keyPair, fw)
             }
-            return userKeyPair
-        }
-    }
-
-    /**
-     * Loads a domain key pair from {@value #DOMAIN_KEY_FILE}. If the file does not exist,
-     * a new key pair is generated and saved.
-     *
-     * @return Domain {@link KeyPair}.
-     */
-    private KeyPair loadOrCreateDomainKeyPair() throws IOException {
-        if (DOMAIN_KEY_FILE.exists()) {
-            DOMAIN_KEY_FILE.withReader {fr ->
-//            try (FileReader fr = new FileReader(DOMAIN_KEY_FILE)) {
-                return KeyPairUtils.readKeyPair(fr)
-            }
-        } else {
-            KeyPair domainKeyPair = KeyPairUtils.createKeyPair(KEY_SIZE)
-            DOMAIN_KEY_FILE.withWriter{fw ->
-//            try (FileWriter fw = new FileWriter(DOMAIN_KEY_FILE)) {
-                KeyPairUtils.writeKeyPair(domainKeyPair, fw)
-            }
-            return domainKeyPair
+            return keyPair
         }
     }
 
@@ -200,21 +219,21 @@ class AcmeClient {
      * {@link Session#login(URL, KeyPair)} by using the stored location.
      *
      * @param session
-     *            {@link Session} to bind with
+     * {@link Session} to bind with
      * @return {@link Login} that is connected to your account
      */
     private Account findOrRegisterAccount(Session session, KeyPair accountKey) throws AcmeException {
         // Ask the user to accept the TOS, if server provides us with a link.
         URI tos = session.getMetadata().getTermsOfService()
         if (tos != null) {
-            acceptAgreement(tos)
+            LOG.info "see terms of service at $tos"
         }
 
         Account account = new AccountBuilder()
                 .agreeToTermsOfService()
                 .useKeyPair(accountKey)
                 .create(session)
-        LOG.info("Registered a new user, URL: {}", account.getLocation())
+        LOG.info("Registered a new user, URL: ${account.getLocation()}")
 
         return account
     }
@@ -224,37 +243,36 @@ class AcmeClient {
      * retrieve a signed certificate for the domain later.
      *
      * @param auth
-     *            {@link Authorization} to perform
+     * {@link Authorization} to perform
      */
-    private void authorize(Authorization auth) throws AcmeException {
-        LOG.info("Authorization for domain {}", auth.getIdentifier().getDomain())
-
+    private ChallengeInfo authorize(Authorization auth) throws AcmeException {
+        LOG.info("Authorization for domain ${auth.identifier.domain}")
+        ChallengeInfo info = new ChallengeInfo()
+        info.domain = auth.identifier.domain
         // The authorization is already valid. No need to process a challenge.
         if (auth.getStatus() == Status.VALID) {
-            return
+            info.stillValid = true
+            return info
         }
 
         // Find the desired challenge and prepare it.
-        Challenge challenge = null
-        switch (CHALLENGE_TYPE) {
-            case ChallengeType.HTTP:
-                challenge = httpChallenge(auth)
-                break
-
-            case ChallengeType.DNS:
-                challenge = dnsChallenge(auth)
-                break
-        }
-
+        Dns01Challenge challenge = auth.findChallenge(Dns01Challenge.TYPE)
         if (challenge == null) {
-            throw new AcmeException("No challenge found")
+            throw new AcmeException("Found no ${Dns01Challenge.TYPE} challenge, don't know what to do...")
         }
 
         // If the challenge is already verified, there's no need to execute it again.
         if (challenge.getStatus() == Status.VALID) {
-            return
+            info.stillValid = true
+            return info
         }
 
+        info.digest = challenge.digest
+        info.stillValid = false
+        return info
+    }
+
+    void triggerChallenge(Challenge challenge) {
         // Now trigger the challenge.
         challenge.trigger()
 
@@ -289,50 +307,6 @@ class AcmeClient {
     }
 
     /**
-     * Prepares a HTTP challenge.
-     * <p>
-     * The verification of this challenge expects a file with a certain content to be
-     * reachable at a given path under the domain to be tested.
-     * <p>
-     * This example outputs instructions that need to be executed manually. In a
-     * production environment, you would rather generate this file automatically, or maybe
-     * use a servlet that returns {@link Http01Challenge#getAuthorization()}.
-     *
-     * @param auth
-     *            {@link Authorization} to find the challenge in
-     * @return {@link Challenge} to verify
-     */
-    Challenge httpChallenge(Authorization auth) throws AcmeException {
-        // Find a single http-01 challenge
-        Http01Challenge challenge = auth.findChallenge(Http01Challenge.class)
-        if (challenge == null) {
-            throw new AcmeException("Found no " + Http01Challenge.TYPE + " challenge, don't know what to do...")
-        }
-
-        // Output the challenge, wait for acknowledge...
-        LOG.info("Please create a file in your web server's base directory.")
-        LOG.info("It must be reachable at: http://{}/.well-known/acme-challenge/{}",
-                auth.getIdentifier().getDomain(), challenge.getToken())
-        LOG.info("File name: {}", challenge.getToken())
-        LOG.info("Content: {}", challenge.getAuthorization())
-        LOG.info("The file must not contain any leading or trailing whitespaces or line breaks!")
-        LOG.info("If you're ready, dismiss the dialog...")
-
-        StringBuilder message = new StringBuilder()
-        message.append("Please create a file in your web server's base directory.\n\n")
-        message.append("http://")
-                .append(auth.getIdentifier().getDomain())
-                .append("/.well-known/acme-challenge/")
-                .append(challenge.getToken())
-                .append("\n\n")
-        message.append("Content:\n\n")
-        message.append(challenge.getAuthorization())
-        acceptChallenge(message.toString())
-
-        return challenge
-    }
-
-    /**
      * Prepares a DNS challenge.
      * <p>
      * The verification of this challenge expects a TXT record with a certain content.
@@ -341,7 +315,7 @@ class AcmeClient {
      * production environment, you would rather configure your DNS automatically.
      *
      * @param auth
-     *            {@link Authorization} to find the challenge in
+     * {@link Authorization} to find the challenge in
      * @return {@link Challenge} to verify
      */
     Challenge dnsChallenge(Authorization auth) throws AcmeException {
@@ -404,7 +378,7 @@ class AcmeClient {
      * user denies confirmation, an exception is thrown.
      *
      * @param agreement
-     *            {@link URI} of the Terms of Service
+     * {@link URI} of the Terms of Service
      */
     void acceptAgreement(URI agreement) throws AcmeException {
         int option = JOptionPane.showConfirmDialog(null,
@@ -434,6 +408,7 @@ class AcmeClient {
         Security.addProvider(new BouncyCastleProvider())
 
         Collection<String> domains = Arrays.asList(args)
+
         try {
             AcmeClient ct = new AcmeClient()
             ct.fetchCertificate(domains)

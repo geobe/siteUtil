@@ -27,6 +27,8 @@ package de.geobe.siteutil.main
 import de.geobe.siteutil.config.RecentValue
 import de.geobe.siteutil.dns.IspDnsConfig
 import de.geobe.siteutil.dns.MyIp
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 /**
  * Created by georg beier on 04.05.2020.
@@ -36,6 +38,8 @@ class SiteUtil {
     private static CONFIGFILE = 'liveConfig.cfg'
 
     private static ACME_URI = 'acme://letsencrypt.org/staging'
+
+    private static final Logger LOG = LoggerFactory.getLogger(SiteUtil.class)
 
     static ToDo = '''
 -done- test _acme entry config in DNS
@@ -77,7 +81,7 @@ distribute to updated sd and install in hotpuma hardware
         de.geobe.siteutil.main.SiteUtil siteUtil = new SiteUtil()
 //        siteUtil.dnsConfig.waitOnPage = true
         def out = siteUtil.maintainIP()
-        println "maintainIp returned $out"
+        LOG.info("maintainIp returned $out")
     }
 
 }
