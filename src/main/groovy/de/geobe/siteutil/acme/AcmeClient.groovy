@@ -31,7 +31,7 @@ import java.security.KeyPair
 import java.security.Security
 
 /**
- * A simple acme client.
+ * A simple interface class to the acme4j ACME client library.
  * <p>
  * Pass the names of the domains as parameters.
  * <p>
@@ -50,6 +50,9 @@ class AcmeClient {
     // File name of the signed certificate
     private File domainChainFile = new File("domain-chain.crt")
 
+    // File name of the certificate URL
+    private File certificateUrlFile = new File('certificateUrl.txt')
+
     // To create a session for Let's Encrypt.
     // Use "acme://letsencrypt.org" for production server
     private String acmeUri = 'acme://letsencrypt.org/staging'
@@ -59,87 +62,126 @@ class AcmeClient {
 
     private static final Logger LOG = LoggerFactory.getLogger(AcmeClient.class)
 
+    /**
+     * Data to be passed on between different steps of the certificate generation process
+     */
     private static class SessionData {
         KeyPair userKeyPair
         KeyPair domainKeyPair
+        String domain
         Session session
         Account acct
-    }
-
-    private static class ChallengeInfo {
-        String domain
-        String digest
-        boolean stillValid
+        Order order
+        Dns01Challenge challenge
     }
 
     private SessionData sessionData = new SessionData()
 
-    void prepare() {
+    static {
+        Security.addProvider(new BouncyCastleProvider())
+    }
+
+    /**
+     * First stage in certificate generation process:<br>
+     * provide needed key pairs and open session with LetsEncrypt server.<br>
+     *     initialized data are passed using #sessionData object
+     * @param domain to get certificate for
+     */
+    void prepare(String domain) {
+        sessionData.domain = domain
         // Load the user key file. If there is no key file, create a new one.
         sessionData.userKeyPair = loadOrCreateKeyPair(userKeyFile)
+
+        // Load or create a key pair for the domains. This should not be the userKeyPair!
+        sessionData.domainKeyPair = loadOrCreateKeyPair(domainKeyFile)
 
         // Create a session for Let's Encrypt.
         // Use "acme://letsencrypt.org" for production server
         sessionData.session = new Session(acmeUri)
-
-        // Load or create a key pair for the domains. This should not be the userKeyPair!
-        sessionData.domainKeyPair = loadOrCreateKeyPair(domainKeyFile)
     }
 
-    def requestChallenge(Collection<String> domains) throws IOException, AcmeException {
+    /**
+     * Second stage in certificate generation process:<br>
+     * Request authorization digest from LetsEncrypt server for the given domain
+     * @return ( @linkChallengeInfo) with needed information to create challenge on DNS server
+     * @throws IOException* @throws AcmeException
+     */
+    ChallengeInfo requestChallenge() throws IOException, AcmeException {
         // Get the Account.
         // If there is no account yet, create a new one.
         sessionData.acct = findOrRegisterAccount(sessionData.session, sessionData.userKeyPair)
 
         // Order the certificate
-        Order order = sessionData.acct.newOrder().domains(domains).create()
+        Order order = sessionData.acct.newOrder().domain(sessionData.domain).create()
+        // save order in session data
+        sessionData.order = order
 
         // Perform all required authorizations
-        for (Authorization auth : order.getAuthorizations()) {
-            authorize(auth)
-        }
-
-
+        def auths = order.authorizations
+        assert auths.size() == 1
+        def challengeInfo = authorize(auths.first())
+        challengeInfo
     }
 
     /**
-     * Generates a certificate for the given domains. Also takes care for the registration
-     * process.
+     * Third step in certificate generation process, to be called after installing challenge digest
+     * on the DNS server:<br>
+     *     Poll until acme server changes challenge status to VALID
      *
-     * @param domains
-     *            Domains to get a common certificate for
+     * @throws AcmeException if challenge is found invalid or server doesn't respond timely
      */
-    void fetchCertificate(Collection<String> domains) throws IOException, AcmeException {
-        // Load the user key file. If there is no key file, create a new one.
-        KeyPair userKeyPair = loadOrCreateKeyPair(userKeyFile)
+    void triggerChallenge() throws AcmeException {
+        Challenge challenge = sessionData.challenge
 
-        // Create a session for Let's Encrypt.
-        // Use "acme://letsencrypt.org" for production server
-        Session session = new Session(acmeUri)
+        // Now trigger the challenge.
+        challenge.trigger()
 
-        // Get the Account.
-        // If there is no account yet, create a new one.
-        Account acct = findOrRegisterAccount(session, userKeyPair)
+        // Poll for the challenge to complete.
+        try {
+            int attempts = 10
+            while (challenge.getStatus() != Status.VALID && attempts-- > 0) {
+                // Did the authorization fail?
+                if (challenge.getStatus() == Status.INVALID) {
+                    throw new AcmeException("Challenge failed... Giving up.")
+                }
 
-        // Load or create a key pair for the domains. This should not be the userKeyPair!
-        KeyPair domainKeyPair = loadOrCreateDomainKeyPair()
+                // Wait for a few seconds
+                Thread.sleep(3000L)
 
-        // Order the certificate
-        Order order = acct.newOrder().domains(domains).create()
-
-        // Perform all required authorizations
-        for (Authorization auth : order.getAuthorizations()) {
-            authorize(auth)
+                // Then update the status
+                challenge.update()
+            }
+        } catch (InterruptedException ex) {
+            LOG.error("interrupted", ex)
+            Thread.currentThread().interrupt()
         }
 
+        // All reattempts are used up and there is still no valid authorization?
+        if (challenge.getStatus() != Status.VALID) {
+            throw new AcmeException("Failed to pass the challenge for domain "
+                    + " ${sessionData.domain}, ... Giving up.")
+        }
+
+        LOG.info("Challenge has been completed. Remember to remove the validation resource.")
+    }
+
+    /**
+     * Fourth step in certificate generation process:<br>
+     *     Build a signed Certificate Signing Request (CSR), send it to the ACME server,
+     *     wait for request completion and save the returned certificate.
+     *
+     * @throws AcmeException if ordering certificate failed or server doesn't respond timely
+     */
+    void fetchCertificate() throws AcmeException {
+        Order order = sessionData.order
+        def domains = [sessionData.domain]
         // Generate a CSR for all of the domains, and sign it with the domain key pair.
         CSRBuilder csrb = new CSRBuilder()
         csrb.addDomains(domains)
-        csrb.sign(domainKeyPair)
+        csrb.sign(sessionData.domainKeyPair)
 
         // Write the CSR to a file, for later use.
         domainCsrFile.withWriter { out ->
-//        try (Writer out = new FileWriter(DOMAIN_CSR_FILE)) {
             csrb.write(out)
         }
 
@@ -169,18 +211,22 @@ class AcmeClient {
         // Get the certificate
         Certificate certificate = order.getCertificate()
 
-        LOG.info("Success! The certificate for domains {} has been generated!", domains)
-        LOG.info("Certificate URL: {}", certificate.getLocation())
+        def certUrl = certificate.location
+        LOG.info("Success! The certificate for domains ${domains} has been generated!")
+        LOG.info("Certificate URL: ${certUrl}")
 
         // Write a combined file containing the certificate and chain.
         domainChainFile.withWriter { fw ->
-//        try (FileWriter fw = new FileWriter(DOMAIN_CHAIN_FILE)) {
             certificate.writeCertificate(fw)
         }
 
+        // Write certificate url to a file
+        certificateUrlFile.write("$certUrl")
+
         // That's all! Configure your web server to use the DOMAIN_KEY_FILE and
-        // DOMAIN_CHAIN_FILE for the requested domans.
+        // DOMAIN_CHAIN_FILE for the requested domain.
     }
+
 
     /**
      * Loads a user key pair from keyFile. If the file does not exist,
@@ -251,18 +297,25 @@ class AcmeClient {
         info.domain = auth.identifier.domain
         // The authorization is already valid. No need to process a challenge.
         if (auth.getStatus() == Status.VALID) {
+            LOG.info('The authorization is already valid. No need to process a challenge')
             info.stillValid = true
             return info
         }
 
-        // Find the desired challenge and prepare it.
+        // We only handle dns challenges, so find and prepare it.
         Dns01Challenge challenge = auth.findChallenge(Dns01Challenge.TYPE)
         if (challenge == null) {
-            throw new AcmeException("Found no ${Dns01Challenge.TYPE} challenge, don't know what to do...")
+            def err = "Found no ${Dns01Challenge.TYPE} challenge, don't know what to do..."
+            LOG.error(err)
+            throw new AcmeException(err)
         }
+
+        // save challenge for use in later step
+        sessionData.challenge = challenge
 
         // If the challenge is already verified, there's no need to execute it again.
         if (challenge.getStatus() == Status.VALID) {
+            LOG.info('The challenge is already verified, there\'s no need to execute it again.')
             info.stillValid = true
             return info
         }
@@ -270,40 +323,6 @@ class AcmeClient {
         info.digest = challenge.digest
         info.stillValid = false
         return info
-    }
-
-    void triggerChallenge(Challenge challenge) {
-        // Now trigger the challenge.
-        challenge.trigger()
-
-        // Poll for the challenge to complete.
-        try {
-            int attempts = 10
-            while (challenge.getStatus() != Status.VALID && attempts-- > 0) {
-                // Did the authorization fail?
-                if (challenge.getStatus() == Status.INVALID) {
-                    throw new AcmeException("Challenge failed... Giving up.")
-                }
-
-                // Wait for a few seconds
-                Thread.sleep(3000L)
-
-                // Then update the status
-                challenge.update()
-            }
-        } catch (InterruptedException ex) {
-            LOG.error("interrupted", ex)
-            Thread.currentThread().interrupt()
-        }
-
-        // All reattempts are used up and there is still no valid authorization?
-        if (challenge.getStatus() != Status.VALID) {
-            throw new AcmeException("Failed to pass the challenge for domain "
-                    + auth.getIdentifier().getDomain() + ", ... Giving up.")
-        }
-
-        LOG.info("Challenge has been completed. Remember to remove the validation resource.")
-        completeChallenge("Challenge has been completed.\nYou can remove the resource again now.")
     }
 
     /**
@@ -341,7 +360,6 @@ class AcmeClient {
 
         return challenge
     }
-
     /**
      * Presents the instructions for preparing the challenge validation, and waits for
      * dismissal. If the user cancelled the dialog, an exception is thrown.
@@ -349,13 +367,13 @@ class AcmeClient {
      * @param message
      *            Instructions to be shown in the dialog
      */
-    void acceptChallenge(String message) throws AcmeException {
+    public void acceptChallenge(String message) throws AcmeException {
         int option = JOptionPane.showConfirmDialog(null,
                 message,
                 "Prepare Challenge",
-                JOptionPane.OK_CANCEL_OPTION)
+                JOptionPane.OK_CANCEL_OPTION);
         if (option == JOptionPane.CANCEL_OPTION) {
-            throw new AcmeException("User cancelled the challenge")
+            throw new AcmeException("User cancelled the challenge");
         }
     }
 
@@ -363,32 +381,16 @@ class AcmeClient {
      * Presents the instructions for removing the challenge validation, and waits for
      * dismissal.
      *
-     * @param message
+     * @param challenge
      *            Instructions to be shown in the dialog
      */
-    void completeChallenge(String message) throws AcmeException {
+    public void completeChallenge(String challenge) throws AcmeException {
         JOptionPane.showMessageDialog(null,
-                message,
+                challenge,
                 "Complete Challenge",
-                JOptionPane.INFORMATION_MESSAGE)
+                JOptionPane.INFORMATION_MESSAGE);
     }
 
-    /**
-     * Presents the user a link to the Terms of Service, and asks for confirmation. If the
-     * user denies confirmation, an exception is thrown.
-     *
-     * @param agreement
-     * {@link URI} of the Terms of Service
-     */
-    void acceptAgreement(URI agreement) throws AcmeException {
-        int option = JOptionPane.showConfirmDialog(null,
-                "Do you accept the Terms of Service?\n\n" + agreement,
-                "Accept ToS",
-                JOptionPane.YES_NO_OPTION)
-        if (option == JOptionPane.NO_OPTION) {
-            throw new AcmeException("User did not accept Terms of Service")
-        }
-    }
 
     /**
      * Invokes this example.
@@ -399,22 +401,44 @@ class AcmeClient {
     static void main(String... args) {
         if (args.length == 0) {
             args = ['iot.geobe.de']
-//            System.err.println("Usage: ClientTest <domain>...")
-//            System.exit(1)
         }
-
         LOG.info("Starting up...")
-
-        Security.addProvider(new BouncyCastleProvider())
-
-        Collection<String> domains = Arrays.asList(args)
+//        Security.addProvider(new BouncyCastleProvider())
+        String domain = args[0]
 
         try {
-            AcmeClient ct = new AcmeClient()
-            ct.fetchCertificate(domains)
+            AcmeClient acmeClient = new AcmeClient()
+            acmeClient.prepare(domain)
+            def cIfo = acmeClient.requestChallenge()
+
+            if(! cIfo.stillValid) {
+                String message = "Please create a TXT record: _acme-challenge.$domain in TXT ${cIfo.digest}".toString()
+                acmeClient.acceptChallenge(message)
+                acmeClient.triggerChallenge()
+                message = 'Challenge has been completed.\nYou can remove the resource again now.'
+                acmeClient.completeChallenge(message)
+            }
+
+            acmeClient.fetchCertificate()
+
+            LOG.info('Thats it')
+
         } catch (Exception ex) {
-            LOG.error("Failed to get a certificate for domains " + domains, ex)
+            LOG.error("Failed to get a certificate for domain $domain", ex)
         }
     }
 
 }
+
+/**
+ * Abstract data type to carry challenge information between AcmeClient and its using classes
+ */
+class ChallengeInfo {
+    /** domain to be validated */
+    String domain
+    /** digest string for DNS based authorisation */
+    String digest
+    /** flag to tell that certificate is still valid and needs no revalidation */
+    boolean stillValid
+}
+
